@@ -1,7 +1,5 @@
 import discord
 from discord import app_commands
-import re
-from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
 from discord.ext import tasks
 from dotenv import load_dotenv
@@ -20,27 +18,28 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Vi samler alle mulige COC tokens i en liste og prøver dem én efter én
 COC_API_TOKENS = [
-    t for t in [
+    t
+    for t in [
+        os.getenv("COC_API_TOKEN_SERVER"),
         os.getenv("COC_API_TOKEN_HOME"),
         os.getenv("COC_API_TOKEN_WORK"),
         os.getenv("COC_API_TOKEN"),
-    ] if t
+    ]
+    if t
 ]
 
 if TOKEN is None:
-    print("[FEJL] DISCORD_TOKEN findes ikke i .env – opret en .env fil med DISCORD_TOKEN=...")
+    print(
+        "[FEJL] DISCORD_TOKEN findes ikke i .env – opret en .env fil med DISCORD_TOKEN=..."
+    )
     exit()
 
 if not COC_API_TOKENS:
-    print("[ADVARSEL] Ingen COC_API_TOKEN_* fundet i .env – Clash of Clans opslag vil ikke virke.")
-
+    print(
+        "[ADVARSEL] Ingen COC_API_TOKEN_* fundet i .env – Clash of Clans opslag vil ikke virke."
+    )
 
 # ================== INDSTILLINGER ==================
-
-# Discord
-STRIKES_CHANNEL_ID = 1405270382130364476
-CLASHKING_BOT_ID = 824653933347209227
-THUMBS_UP_EMOJI = "👍"
 
 # Dit Clash of Clans clan tag
 OUR_CLAN_TAG = "#2RL2LGP0Y"  # <-- skift hvis jeres tag ændrer sig
@@ -49,8 +48,8 @@ OUR_CLAN_TAG = "#2RL2LGP0Y"  # <-- skift hvis jeres tag ændrer sig
 GOOGLE_SERVICE_ACCOUNT_FILE = "service_account.json"  # JSON-filen du downloadede
 GOOGLE_SHEET_ID = "1Y7mcQZWXVBOBYuVNY74wxkmeJY_Yg8eZgSAhskKnhhM"
 
-STRIKES_WORKSHEET_NAME = "Ark1"   # fanen med strikes
-MEMBERS_WORKSHEET_NAME = "Ark2"   # fanen med member-/link-liste
+STRIKES_WORKSHEET_NAME = "Ark1"  # fanen med strikes
+MEMBERS_WORKSHEET_NAME = "Ark2"  # fanen med member-/link-liste
 
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -106,6 +105,7 @@ def get_members_worksheet():
 
 # ================== Clash of Clans API ==================
 
+
 def normalize_tag(tag: str) -> str:
     """Fjerner # og uppercaser tag for nem sammenligning."""
     if not tag:
@@ -116,7 +116,7 @@ def normalize_tag(tag: str) -> str:
 def get_coc_player(player_tag: str):
     """
     Slår en Clash of Clans spiller op via officielt API.
-    Prøver flere tokens i rækkefølge (HOME, WORK, evt. COC_API_TOKEN).
+    Prøver flere tokens i rækkefølge (SERVER, HOME, WORK, evt. COC_API_TOKEN).
     player_tag skal være uden #, fx 'GP9UUQP92'.
     Returnerer et dict med spillerdata eller None ved fejl.
     """
@@ -130,7 +130,7 @@ def get_coc_player(player_tag: str):
 
     for idx, token in enumerate(COC_API_TOKENS, start=1):
         headers = {
-            "Authorization": f"Bearer {token}"
+            "Authorization": f"Bearer {token}",
         }
         try:
             print(f"[COC API] Forsøger token #{idx} for spiller {player_tag}...")
@@ -141,7 +141,9 @@ def get_coc_player(player_tag: str):
                 return resp.json()
 
             if resp.status_code in (401, 403):
-                print(f"[COC API] Token #{idx} gav {resp.status_code} – prøver næste token hvis muligt.")
+                print(
+                    f"[COC API] Token #{idx} gav {resp.status_code} – prøver næste token hvis muligt."
+                )
                 last_error = f"{resp.status_code}: {resp.text}"
                 continue
 
@@ -155,7 +157,9 @@ def get_coc_player(player_tag: str):
             continue
 
     if last_error:
-        print(f"[COC API] Alle tokens fejlede for {player_tag}. Sidste fejl: {last_error}")
+        print(
+            f"[COC API] Alle tokens fejlede for {player_tag}. Sidste fejl: {last_error}"
+        )
     return None
 
 
@@ -172,7 +176,7 @@ def determine_role_from_coc(player_data: dict) -> str:
     if not clan:
         return "Kicked"
 
-    role_key = player_data.get("role", "").strip()
+    role_key = (player_data.get("role") or "").strip()
     role_map = {
         "member": "Member",
         "admin": "Elder",
@@ -189,6 +193,7 @@ def determine_role_from_coc(player_data: dict) -> str:
 
 # ================== HJÆLPEFUNKTIONER TIL STRIKES ==================
 
+
 def generate_strike_id() -> str:
     """Genererer et 5-tegns Strike ID, fx 'IU55A'."""
     chars = string.ascii_uppercase + string.digits
@@ -196,28 +201,37 @@ def generate_strike_id() -> str:
 
 
 def get_latest_total_for_coc(coc_id_raw: str) -> int:
-    """Finder seneste 'Strikes i alt' for et givent COC ID i Ark1."""
+    """
+    Finder det aktuelle totale antal strikes for et givent COC ID i Ark1
+    ved at SUMMERE kolonne 4 ('Antal strikes') for alle rækker med dette ID.
+
+    Fordel: når gamle/udløbne strikes slettes, falder totalen automatisk.
+    """
     ws = get_strikes_worksheet()
     all_values = ws.get_all_values()
     rows = all_values[1:] if len(all_values) > 1 else []
 
     coc_norm = normalize_tag(coc_id_raw)
-    latest_total = 0
+    total = 0
 
-    # Gå nedefra (seneste først)
-    for row in reversed(rows):
-        if len(row) < 5:
+    for row in rows:
+        if len(row) < 4:
             continue
         row_coc = normalize_tag(row[0] or "")
         if row_coc != coc_norm:
             continue
-        try:
-            latest_total = int(row[4])
-        except Exception:
-            latest_total = 0
-        break
 
-    return latest_total
+        try:
+            antal_row = int(row[3])
+        except Exception:
+            try:
+                antal_row = int(str(row[3]).strip())
+            except Exception:
+                antal_row = 0
+
+        total += antal_row
+
+    return total
 
 
 def create_strike_and_build_embed(
@@ -264,7 +278,7 @@ def create_strike_and_build_embed(
     if not name:
         name = coc_norm  # bedre end ingenting
 
-    # Beregn total strikes
+    # Beregn total strikes ud fra SUM af alle eksisterende rækker
     total_before = get_latest_total_for_coc(coc_norm)
     total_now = total_before + antal
 
@@ -277,15 +291,15 @@ def create_strike_and_build_embed(
     strike_id = generate_strike_id()
 
     row = [
-        coc_norm,               # COC ID
-        name,                   # NAVN
-        rolle,                  # Rolle
-        antal,                  # Antal strikes (weight)
-        total_now,              # Strikes i alt
-        reason,                 # Årsag
-        udloeb_str,             # Udløb
-        strike_id,              # Strike ID
-        dato_tildelt_str,       # Dato tildelt
+        coc_norm,  # COC ID
+        name,  # NAVN
+        rolle,  # Rolle
+        antal,  # Antal strikes (weight)
+        total_now,  # Strikes i alt (ny beregnet total)
+        reason,  # Årsag
+        udloeb_str,  # Udløb
+        strike_id,  # Strike ID
+        dato_tildelt_str,  # Dato tildelt
         giver.display_name or giver.name,  # Givet af
     ]
 
@@ -343,7 +357,6 @@ def get_strikes_for_coc(coc_id_raw: str):
             "givet_af": row[9] if len(row) > 9 else "",
         }
 
-        # prøv at caste antal til int
         try:
             entry["antal"] = int(entry["antal"])
         except Exception:
@@ -356,7 +369,9 @@ def get_strikes_for_coc(coc_id_raw: str):
     return strikes
 
 
-def build_removed_strike_embed(strike_row: dict, invoker: discord.Member) -> discord.Embed:
+def build_removed_strike_embed(
+    strike_row: dict, invoker: discord.Member
+) -> discord.Embed:
     """
     Bygger et pænt embed når en strike er fjernet.
     strike_row er et dict fra get_strikes_for_coc eller direkte læst fra arket.
@@ -395,7 +410,6 @@ def build_removed_strike_embed(strike_row: dict, invoker: discord.Member) -> dis
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.reactions = True
 intents.guilds = True
 intents.members = True  # så vi kan slå brugere op
 
@@ -414,9 +428,7 @@ class StrikeLoggerClient(discord.Client):
 
     async def on_ready(self):
         print(f"[OK] Logget ind som: {self.user} (id={self.user.id})")
-        print(f"[INFO] STRIKES_CHANNEL_ID = {STRIKES_CHANNEL_ID}")
-        print(f"[INFO] CLASHKING_BOT_ID   = {CLASHKING_BOT_ID}")
-        print("[INFO] Botten er klar. Reager med 👍 på en ClashKing-strike-besked.\n")
+        print("[INFO] Botten er klar.")
 
         try:
             ws = get_strikes_worksheet()
@@ -425,57 +437,6 @@ class StrikeLoggerClient(discord.Client):
             print(f"[OK] Members-sheet klar: {ws2.title}")
         except Exception as e:
             print("[FEJL] Kunne ikke forbinde til Google Sheet:", e)
-
-    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        try:
-            print("-------------------------------------------------------------")
-            print("[DEBUG] on_raw_reaction_add fired")
-            print(f"  Emoji:      {payload.emoji}")
-            print(f"  Kanal ID:   {payload.channel_id}")
-            print(f"  Besked ID:  {payload.message_id}")
-            print(f"  Bruger ID:  {payload.user_id}")
-
-            if payload.user_id == self.user.id:
-                print("[DEBUG] Ignorerer egen bot.")
-                return
-
-            if str(payload.emoji) != THUMBS_UP_EMOJI:
-                print("[DEBUG] Forkert emoji.")
-                return
-
-            if payload.channel_id != STRIKES_CHANNEL_ID:
-                print("[DEBUG] Forkert kanal.")
-                return
-
-            print("[DEBUG] OK → henter besked...")
-
-            channel = self.get_channel(payload.channel_id) or await self.fetch_channel(payload.channel_id)
-            message: discord.Message = await channel.fetch_message(payload.message_id)
-
-            print(f"[DEBUG] Besked hentet. Afsender: {message.author} (id={message.author.id})")
-
-            if message.author.id != CLASHKING_BOT_ID:
-                print("[DEBUG] Ikke ClashKing → ignorerer")
-                return
-
-            if not message.embeds:
-                print("[FEJL] Ingen embeds.")
-                return
-
-            embed = message.embeds[0]
-
-            print("[DEBUG] Embed fundet")
-
-            strike_data = self.parse_strike_embed(message, embed)
-
-            print("\n[INFO] Parsed strike data:")
-            for k, v in strike_data.items():
-                print(f"  {k}: {v}")
-
-            await self.save_strike_to_sheet(strike_data)
-
-        except Exception as e:
-            print(f"[EXCEPTION] {e}")
 
     # ================== DAGLIG OPRYDNING AF UDLØBNE STRIKES ==================
 
@@ -536,132 +497,17 @@ class StrikeLoggerClient(discord.Client):
         except Exception as e:
             print("[FEJL] Daglig cleanup af strikes fejlede:", e)
 
-    # ----------- PARSING AF EMBED ---------------------
-
-    def parse_strike_embed(self, message: discord.Message, embed: discord.Embed):
-        data = {}
-
-        dt_tildelt = message.created_at.astimezone(timezone.utc)
-        data["dato_tildelt"] = dt_tildelt.strftime("%d/%m/%Y")
-
-        data["discord_message_id"] = message.id
-        data["discord_message_link"] = (
-            f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
-        )
-
-        description = embed.description or ""
-        footer_text = embed.footer.text if embed.footer else ""
-
-        lines = [l.strip() for l in description.splitlines() if l.strip()]
-        if not lines:
-            return data
-
-        header = lines[0].strip("*")
-
-        link_match = re.search(r"\[(.+?)\]\((https?://[^\)]+)\)", header)
-        if link_match:
-            navn = link_match.group(1)
-            url = link_match.group(2)
-
-            data["NAVN"] = navn
-            data["profil_link"] = url
-
-            parsed = urlparse(url)
-            qs = parse_qs(parsed.query)
-            taglist = qs.get("playerTag") or qs.get("tag") or []
-            if taglist:
-                coc = taglist[0].replace("%23", "").replace("#", "").upper()
-                data["COC_ID"] = coc
-
-        clan_match = re.search(r"\)\s*\[([^\]]+)\]", header)
-        if clan_match:
-            data["klan"] = clan_match.group(1)
-
-        giver_match = re.search(r"by\s+(.+?)\.", header)
-        if giver_match:
-            giver_raw = giver_match.group(1)
-            data["givet_af_mention"] = giver_raw
-
-            id_match = re.search(r"<@!?(\d+)>", giver_raw)
-            if id_match:
-                giver_id = int(id_match.group(1))
-                data["givet_af_id"] = giver_id
-
-                member = message.guild.get_member(giver_id)
-                if member:
-                    data["givet_af"] = member.display_name or member.name
-                else:
-                    data["givet_af"] = giver_raw
-
-        for line in lines[1:]:
-            if line.startswith("Strike Weight:"):
-                m = re.search(r"Strike Weight:\s*(\d+).*Total Strikes Now:\s*(\d+)", line)
-                if m:
-                    data["antal_strikes"] = int(m.group(1))
-                    data["strikes_i_alt"] = int(m.group(2))
-
-            elif line.startswith("Rollover:"):
-                raw = line.replace("Rollover:", "").strip()
-                data["udloeb_raw"] = raw
-
-                ts = re.search(r"<t:(\d+):", raw)
-                if ts:
-                    dt = datetime.fromtimestamp(int(ts.group(1)), tz=timezone.utc)
-                    data["udloeb"] = dt.strftime("%d/%m/%Y")
-
-            elif line.startswith("Reason:"):
-                data["aarsag"] = line.replace("Reason:", "").strip()
-
-        sid = re.search(r"Strike ID:\s*([A-Za-z0-9]+)", footer_text)
-        if sid:
-            data["strike_id"] = sid.group(1)
-
-        return data
-
-    # ----------- GOOGLE SHEETS – STRIKES FRA CLASHKING ---------------------
-
-    async def save_strike_to_sheet(self, data):
-        try:
-            ws = get_strikes_worksheet()
-
-            rolle = ""
-            coc_id = data.get("COC_ID")
-            if coc_id:
-                player = get_coc_player(coc_id)
-                rolle = determine_role_from_coc(player)
-                if rolle:
-                    print(f"[COC API] Rolle for {coc_id}: {rolle}")
-
-            row = [
-                data.get("COC_ID", ""),
-                data.get("NAVN", ""),
-                rolle,
-                data.get("antal_strikes", ""),
-                data.get("strikes_i_alt", ""),
-                data.get("aarsag", ""),
-                data.get("udloeb", ""),
-                data.get("strike_id", ""),
-                data.get("dato_tildelt", ""),
-                data.get("givet_af", ""),
-            ]
-
-            ws.append_row(row, value_input_option="USER_ENTERED")
-            print("[OK] Strike skrevet til Google Sheet ✅")
-
-        except Exception as e:
-            print("[FEJL] Kunne ikke skrive til Google Sheet:", e)
-
 
 # ================== INSTANTIER BOT ==================
 
 client = StrikeLoggerClient(intents=intents)
 
-
 # ================== SLASH-COMMAND: /link_coc ==================
+
 
 @client.tree.command(
     name="link_coc",
-    description="Link en Clash of Clans profil til en Discord-bruger (kun for rollen 'Ledere')"
+    description="Link en Clash of Clans profil til en Discord-bruger (kun for rollen 'Ledere')",
 )
 @app_commands.describe(
     player_tag="Player tag, fx #ABC123",
@@ -670,7 +516,7 @@ client = StrikeLoggerClient(intents=intents)
 async def link_coc(
     interaction: discord.Interaction,
     player_tag: str,
-    user: discord.Member,   # user er påkrævet
+    user: discord.Member,  # user er påkrævet
 ):
     # Kun i guilds
     if interaction.guild is None:
@@ -742,8 +588,7 @@ async def link_coc(
                 "leader": "Leader",
             }
             role_text = role_map.get(
-                role_key,
-                role_key.capitalize() if role_key else "Member"
+                role_key, role_key.capitalize() if role_key else "Member"
             )
 
     # ---------- TH level ----------
@@ -812,9 +657,10 @@ async def link_coc(
 
 # ================== SLASH-COMMAND: /unlink_coc ==================
 
+
 @client.tree.command(
     name="unlink_coc",
-    description="Fjern linket mellem et COC player tag og en Discord-bruger (kun Ledere)"
+    description="Fjern linket mellem et COC player tag og en Discord-bruger (kun Ledere)",
 )
 @app_commands.describe(
     player_tag="Player tag, fx #ABC123, som skal un-linkes",
@@ -899,9 +745,10 @@ async def unlink_coc(
 
 # ================== SLASH-COMMAND: /my_strikes ==================
 
+
 @client.tree.command(
     name="my_strikes",
-    description="Se dine strikes (baseret på linkede COC-profiler)."
+    description="Se dine strikes (baseret på linkede COC-profiler).",
 )
 @app_commands.describe(
     public="Hvis true, sender jeg svaret offentligt i kanalen i stedet for privat.",
@@ -943,6 +790,7 @@ async def my_strikes(
         )
         return
 
+    # Kun Ledere må bruge discord_user-parameteren
     if discord_user is not None and not is_leader:
         await interaction.response.send_message(
             "Kun brugere med rollen **Ledere** kan slå andres strikes op.",
@@ -950,19 +798,25 @@ async def my_strikes(
         )
         return
 
+    # Hvem er det, vi viser strikes for?
     target: discord.Member = discord_user or invoker
 
+    # Sprogvalg
     lang_code = language.value if language else "da"
+
     target_id_str = str(target.id)
 
     # ---------- Find alle COC ID'er linket til target ----------
+
     try:
         ws_members = get_members_worksheet()
         all_members = ws_members.get_all_values()
         rows = all_members[1:] if len(all_members) > 1 else []
 
-        linked_accounts: list[tuple[str, str]] = []
+        linked_accounts: list[tuple[str, str]] = []  # (coc_id, navn)
 
+        # Ark2-kolonner:
+        # 0: COC ID | 1: NAVN | 2: Rolle | 3: TH level | 4: Discord Navn | 5: Discord Rank | 6: Discord ID
         for row in rows:
             if len(row) < 7:
                 continue
@@ -999,6 +853,7 @@ async def my_strikes(
         return
 
     # ---------- Hent seneste strikes for hver COC ID ----------
+
     try:
         ws_strikes = get_strikes_worksheet()
         all_strikes = ws_strikes.get_all_values()
@@ -1008,16 +863,32 @@ async def my_strikes(
 
         for coc_id, navn in linked_accounts:
             latest = None
+            total_for_coc = 0
 
-            for row in reversed(strike_rows):
+            # Gennemgå ALLE strikes for denne COC ID og:
+            # - summér 'antal' (kolonne 4)
+            # - gem den sidst oprettede række som 'latest'
+            for row in strike_rows:
                 if len(row) < 7:
                     continue
+
                 row_coc = (row[0] or "").strip().upper()
                 if normalize_tag(row_coc) != normalize_tag(coc_id):
                     continue
-                latest = row
-                break
 
+                # læg antal til total
+                try:
+                    antal_row = int(row[3])
+                except Exception:
+                    try:
+                        antal_row = int(str(row[3]).strip())
+                    except Exception:
+                        antal_row = 0
+
+                total_for_coc += antal_row
+                latest = row  # denne ender som "seneste strike" for denne COC ID
+
+            # Hvis der slet ikke er strikes for denne COC ID
             if not latest:
                 if lang_code == "en":
                     line = f"{navn} (#{coc_id}): no strikes recorded. 💚"
@@ -1026,52 +897,27 @@ async def my_strikes(
                 results_lines.append(line)
                 continue
 
+            # weight = antal for det seneste strike (til teksten)
             try:
                 weight = int(latest[3])
             except Exception:
                 weight = latest[3]
-
-            try:
-                total = int(latest[4])
-            except Exception:
-                total = latest[4]
 
             reason = latest[5] if len(latest) > 5 else ""
             udloeb = latest[6] if len(latest) > 6 else ""
 
             if lang_code == "en":
                 line = (
-                    f"{navn} (#{coc_id}): you have **{total} strikes** in total. "
+                    f"{navn} (#{coc_id}): you have **{total_for_coc} strikes** in total. "
                     f"Last strike gave **{weight}** for **{reason}** (expires **{udloeb}**)."
                 )
             else:
                 line = (
-                    f"{navn} (#{coc_id}): du har **{total} strikes** i alt. "
+                    f"{navn} (#{coc_id}): du har **{total_for_coc} strikes** i alt. "
                     f"Sidste strike gav **{weight}** for **{reason}** (udløber **{udloeb}**)."
                 )
 
             results_lines.append(line)
-
-        if lang_code == "en":
-            header = f"Hi {target.mention}! Here are your strikes:\n"
-        else:
-            header = f"Hej {target.mention}! Her er dine strikes:\n"
-
-        body = "\n\n".join(results_lines)
-
-        footer = ""
-        if discord_user is not None and discord_user.id != invoker.id:
-            if lang_code == "en":
-                footer = f"\n\n_Requested by {invoker.mention}_"
-            else:
-                footer = f"\n\n_Forespurgt af {invoker.mention}_"
-
-        full_msg = header + "\n" + body + footer
-
-        await interaction.response.send_message(
-            full_msg,
-            ephemeral=not public,
-        )
 
     except Exception as e:
         print("[FEJL] Kunne ikke læse strikes-worksheet i /my_strikes:", e)
@@ -1079,9 +925,36 @@ async def my_strikes(
             "Der skete en fejl da jeg forsøgte at finde strikes.",
             ephemeral=True,
         )
+        return
+
+    # ----------- Byg header-tekst -----------
+
+    if lang_code == "en":
+        header = f"Hi {target.mention}! Here are your strikes:\n"
+    else:
+        header = f"Hej {target.mention}! Her er dine strikes:\n"
+
+    # Mere luft mellem linjer: tom linje mellem hver konto
+    body = "\n\n".join(results_lines)
+
+    # Hvis en leder kigger på en anden spiller, tilføj note nederst
+    footer = ""
+    if discord_user is not None and discord_user.id != invoker.id:
+        if lang_code == "en":
+            footer = f"\n\n_Requested by {invoker.mention}_"
+        else:
+            footer = f"\n\n_Forespurgt af {invoker.mention}_"
+
+    full_msg = header + "\n" + body + footer
+
+    await interaction.response.send_message(
+        full_msg,
+        ephemeral=not public,
+    )
 
 
 # ================== UI-KOMPONENTER TIL /add_strike & /remove_strike ==================
+
 
 class StrikeProfileSelectView(discord.ui.View):
     """
@@ -1359,9 +1232,10 @@ class RemoveStrikeSelect(discord.ui.Select):
 
 # ================== SLASH-COMMAND: /add_strike ==================
 
+
 @client.tree.command(
     name="add_strike",
-    description="Tilføj en strike til en spiller (kun for Ledere)."
+    description="Tilføj en strike til en spiller (kun for Ledere).",
 )
 @app_commands.describe(
     reason="Årsag til striken.",
@@ -1494,9 +1368,10 @@ async def add_strike(
 
 # ================== SLASH-COMMAND: /remove_strike ==================
 
+
 @client.tree.command(
     name="remove_strike",
-    description="Fjern en strike fra en spiller (kun for Ledere)."
+    description="Fjern en strike fra en spiller (kun for Ledere).",
 )
 @app_commands.describe(
     spiller="Vælg Discord-bruger (valgfri – så vælger du profil + strike via dropdowns).",
